@@ -1,0 +1,1375 @@
+# Pushes to each pull request will trigger a cancellation of any existing push jobs for that pull request,
+# and will restart the build based on the latest push data for that specific pull request.
+# This job is responsible for inspecting the changes in the repository and setting specific output variables
+# that subsequent jobs can use to determine whether a particular job should be skipped or included.
+# Approx 1m
+# GitHub actions seem to struggle returning actions/cache cache-hit
+# Directly use the cache action here to control whether to fetch dependencies
+# Caches should be restored based on a logical order to minimize the build and test
+# execution time. Here the logic is as follows:
+#   1. Restore this PR's cache if the PR has previously been built
+#   2. Restore the latest main cache if the core pom has not changed
+#   3. Restore the latest main cache available
+# This should minimize the download time required for updating dependencies
+# This step is responsible for pulling down artifacts
+# Unfortunately due to the nature of how some of the maven workflows work, the only reliable way
+# to guarantee fully seeding the maven cache is to run a full build. This step does not execute
+# tests, formatting, checkstyle, nor import sorts.
+#
+# This check is conditioned so that if the cache-key was not found, we will execute this step.
+# If the cache-key was found, this means we cannot update the cache and therefore we should
+# not need to explicitly run this step. This should improve response of format/checkstyle
+# errors to users faster.
+#
+# This job also explicitly excludes the "debezium-microbenchmark-oracle" module temporarily.
+# There is a dependency on xstream.jar for this module that should be fixed and made to not
+# be required so that the module can be built on GitHub Actions.
+# There are some corner cases where dependencies change and core no longer defines the
+# dependency; however Debezium Server due to checking out main, may still refer to it.
+# In this case, if the artifact fetch fails, we shouldn't fail the job.  Fixing the
+# dependency in the Debezium Server repository with the same Jira issue tag as the
+# main repository's PR will run the build based on the PR changes in main, and will
+# allow validating the Debezium Server build separately.
+# Approx 1m
+# Runs each combination concurrently
+# Approx 40m each
+# Runs each combination concurrently
+# Approx 40m each
+# Runs each combination concurrently
+# Approx 40m each
+# Runs each combination concurrently
+# Approx 1h 45m
+# Approx 6m
+# Approx 2m
+# Approx 5m
+# Approx 2m
+# Approx 5m
+# Approx 3m
+# Approx 25m
+# We specifically only use the hash of the pom files from the core repository
+# Approx 1h
+# We specifically only use the hash of the pom files from the core repository
+# We specifically only use the hash of the pom files from the core repository
+# Approx 45m
+# We specifically only use the hash of the pom files from the core repository
+# Approx 20m
+# We specifically only use the hash of the pom files from the core repository
+# Approx 7m
+# We specifically only use the hash of the pom files from the core repository
+# Approx 1m
+# We specifically only use the hash of the pom files from the core repository
+
+name: Modified Build Debezium (PR)
+env:
+  MAVEN_FULL_BUILD_PROJECTS: \!debezium-microbenchmark-oracle
+jobs:
+  file_changes:
+    name: file_changes
+    runs-on: ubuntu-latest
+    outputs:
+      common-changed: ${{ steps.changed-files-common.outputs.any_changed }}
+      mongodb-changed: ${{ steps.changed-files-mongodb.outputs.any_changed }}
+      mariadb-changed: ${{ steps.changed-files-mariadb.outputs.any_changed }}
+      mysql-changed: ${{ steps.changed-files-mysql.outputs.any_changed }}
+      postgresql-changed: ${{ steps.changed-files-postgresql.outputs.any_changed }}
+      oracle-changed: ${{ steps.changed-files-oracle.outputs.any_changed }}
+      sqlserver-changed: ${{ steps.changed-files-sqlserver.outputs.any_changed }}
+      jdbc-changed: ${{ steps.changed-files-jdbc.outputs.any_changed }}
+      outbox-changed: ${{ steps.changed-files-outbox.outputs.any_changed }}
+      rest-extension-changed: ${{ steps.changed-files-rest-extension.outputs.any_changed
+        }}
+      schema-generator-changed: ${{ steps.changed-files-schema-generator.outputs.any_changed
+        }}
+      debezium-testing-changed: ${{ steps.changed-files-debezium-testing.outputs.any_changed
+        }}
+      debezium-testing-mongodb-changed: ${{ steps.changed-files-debezium-testing-mongodb.outputs.any_changed
+        }}
+      mysql-ddl-parser-changed: ${{ steps.changed-files-mysql-ddl-parser.outputs.any_changed
+        }}
+      oracle-ddl-parser-changed: ${{ steps.changed-files-oracle-ddl-parser.outputs.any_changed
+        }}
+      mariadb-ddl-parser-changed: ${{ steps.changed-files-mariadb-ddl-parser.outputs.any_changed
+        }}
+      documentation-only-changed: ${{ steps.changed-files-documentation.outputs.only_changed
+        }}
+      storage-only-changed: ${{ steps.changed-files-storage.outputs.only_changed }}
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-file_changes.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - run: touch optcd-3.txt
+    - name: Get modified files (Common)
+      id: changed-files-common
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          support/checkstyle/**
+          support/revapi/**
+          debezium-api/**
+          debezium-assembly-descriptors/**
+          debezium-core/**
+          debezium-embedded/**
+          debezium-revapi/**
+          debezium-ide-configs/**
+          debezium-parent/pom.xml
+          debezium-bom/pom.xml
+          debezium-storage/**
+          debezium-scripting/**
+          pom.xml
+          .mvn/**
+          .github/actions/**
+          .github/workflows/debezium-workflow-pr.yml
+    - run: touch optcd-4.txt
+    - name: Get modified files (MongoDB)
+      id: changed-files-mongodb
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          debezium-connector-mongodb/**
+    - run: touch optcd-5.txt
+    - name: Get modified files (MySQL)
+      id: changed-files-mysql
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          debezium-connector-mysql/**
+          debezium-connector-binlog/**
+    - run: touch optcd-6.txt
+    - name: Get modified files (MariaDB)
+      id: changed-files-mariadb
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          debezium-connector-mariadb/**
+          debezium-connector-binlog/**
+    - run: touch optcd-7.txt
+    - name: Get modified files (PostgreSQL)
+      id: changed-files-postgresql
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          debezium-connector-postgres/**
+    - run: touch optcd-8.txt
+    - name: Get modified files (Oracle)
+      id: changed-files-oracle
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          debezium-connector-oracle/**
+    - run: touch optcd-9.txt
+    - name: Get modified files (SQL Server)
+      id: changed-files-sqlserver
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          debezium-connector-sqlserver/**
+    - run: touch optcd-10.txt
+    - name: Get modified files (JDBC)
+      id: changed-files-jdbc
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          debezium-connector-jdbc/**
+    - run: touch optcd-11.txt
+    - name: Get modified files (Quarkus Outbox)
+      id: changed-files-outbox
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          debezium-quarkus-outbox/**
+          debezium-quarkus-outbox-common/**
+          debezium-quarkus-outbox-reactive/**
+    - run: touch optcd-12.txt
+    - name: Get modified files (REST Extension)
+      id: changed-files-rest-extension
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          debezium-connect-rest-extension/**
+    - run: touch optcd-13.txt
+    - name: Get modified files (Schema Generator)
+      id: changed-files-schema-generator
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          debezium-schema-generator/**
+    - run: touch optcd-14.txt
+    - name: Get modified files (Debezium Testing)
+      id: changed-files-debezium-testing
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          debezium-testing/**
+    - run: touch optcd-15.txt
+    - name: Get modified files (Debezium Testing MongoDB)
+      id: changed-files-debezium-testing-mongodb
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          debezium-testing/**/MongoDb*.java
+    - run: touch optcd-16.txt
+    - name: Get modified files (MySQL DDL parser)
+      id: changed-files-mysql-ddl-parser
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          debezium-ddl-parser/src/main/antlr4/io/debezium/ddl/parser/mysql/**
+          debezium-ddl-parser/src/main/java/io/debezium/antlr/**
+          debezium-ddl-parser/src/test/resources/mysql/examples/**
+    - run: touch optcd-17.txt
+    - name: Get modified files (Oracle DDL parser)
+      id: changed-files-oracle-ddl-parser
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          debezium-ddl-parser/src/main/antlr4/io/debezium/ddl/parser/oracle/**
+          debezium-ddl-parser/src/main/java/io/debezium/antlr/**
+          debezium-ddl-parser/src/main/java/io/debezium/ddl/parser/oracle/**
+          debezium-ddl-parser/src/test/resources/oracle/examples/**
+    - run: touch optcd-18.txt
+    - name: Get modified files (Documentation)
+      id: changed-files-documentation
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          documentation/**
+    - run: touch optcd-19.txt
+    - name: Get modified files (Storage)
+      id: changed-files-storage
+      uses: tj-actions/changed-files@v45.0.2
+      with:
+        files: |-
+          debezium-storage/**
+    - run: touch optcd-20.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-file_changes
+        path: /home/runner/inotifywait-log-file_changes.csv
+  build_cache:
+    name: build_cache
+    needs:
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_cache.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action (Core)
+      uses: actions/checkout@v4
+      with:
+        path: core
+    - run: touch optcd-3.txt
+    - name: Checkout Action (Debezium Server)
+      uses: actions/checkout@v4
+      with:
+        repository: debezium/debezium-server
+        path: server
+        ref: ${{ github.event.pull_request.base.ref }}
+    - run: touch optcd-4.txt
+    - uses: ./core/.github/actions/setup-java
+    - run: touch optcd-5.txt
+    - id: maven-cache-check
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2/repository
+        key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
+        restore-keys: |-
+          maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
+          maven-debezium-test-push-build-${{ hashFiles('core/**/pom.xml') }}
+          maven-debezium-test-push-build-
+    - run: touch optcd-6.txt
+    - name: Download dependencies (Core)
+      run: |-
+        ./core/mvnw -B -ntp clean install -f core/pom.xml -pl ${{ env.MAVEN_FULL_BUILD_PROJECTS }} -Dformat.skip=true -Dcheckstyle.skip=true -Dorg.slf4j.simpleLogger.showDateTime=true -Dorg.slf4j.simpleLogger.dateTimeFormat="YYYY-MM-dd HH:mm:ss,SSS" -DskipTests=true -DskipITs=true
+    - run: touch optcd-7.txt
+    - name: Download dependencies (Debezium Server)
+      continue-on-error: true
+      run: |-
+        ./server/mvnw -B -ntp clean install -f server/pom.xml -Dformat.skip=true -Dcheckstyle.skip=true -Dorg.slf4j.simpleLogger.showDateTime=true -Dorg.slf4j.simpleLogger.dateTimeFormat="YYYY-MM-dd HH:mm:ss,SSS" -DskipTests=true -DskipITs=true
+    - run: touch optcd-8.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_cache
+        path: /home/runner/inotifywait-log-build_cache.csv
+  check_style:
+    name: check_style
+    needs:
+    - build_cache
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-check_style.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action
+      uses: actions/checkout@v4
+    - run: touch optcd-3.txt
+    - uses: ./.github/actions/checkstyle-format
+      with:
+        maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
+    - run: touch optcd-4.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-check_style
+        path: /home/runner/inotifywait-log-check_style.csv
+  build_mongodb:
+    strategy:
+      matrix:
+        version-mongo-server:
+        - '5.0'
+        - '7.0'
+      fail-fast: false
+    name: build_mongodb (${{ matrix.version-mongo-server }})
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_mongodb (${{ matrix.version-mongo-server }}).csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action
+      uses: actions/checkout@v4
+    - run: touch optcd-3.txt
+    - uses: ./.github/actions/build-debezium-mongodb
+      with:
+        maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
+        version-mongo-server: ${{ matrix.version-mongo-server }}
+    - run: touch optcd-4.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_mongodb (${{ matrix.version-mongo-server }})
+        path: /home/runner/inotifywait-log-build_mongodb (${{ matrix.version-mongo-server
+          }}).csv
+  build_mysql:
+    strategy:
+      matrix:
+        profile:
+        - mysql-ci
+        - mysql-ci-gtids
+        - mysql-ci-percona
+        - mysql-ci-ssl
+        version-mysql-server:
+        - '8.0'
+        - '8.4'
+        - '9.0'
+      fail-fast: false
+    name: build_mysql (${{ matrix.profile }}, ${{ matrix.version-mysql-server }})
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_mysql (${{ matrix.profile }}, ${{ matrix.version-mysql-server }}).csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action
+      uses: actions/checkout@v4
+    - run: touch optcd-3.txt
+    - uses: ./.github/actions/build-debezium-mysql
+      with:
+        maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
+        version-mysql-server: ${{ matrix.version-mysql-server }}
+        profile: ${{ matrix.profile }}
+    - run: touch optcd-4.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_mysql (${{ matrix.profile }}, ${{ matrix.version-mysql-server
+          }})
+        path: /home/runner/inotifywait-log-build_mysql (${{ matrix.profile }}, ${{
+          matrix.version-mysql-server }}).csv
+  build_mariadb:
+    strategy:
+      matrix:
+        profile:
+        - mariadb-ci
+        - mariadb-ci-gtids
+      fail-fast: false
+    name: build_mariadb (${{ matrix.profile }})
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_mariadb (${{ matrix.profile }}).csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action
+      uses: actions/checkout@v4
+    - run: touch optcd-3.txt
+    - uses: ./.github/actions/build-debezium-mariadb
+      with:
+        maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
+        profile: ${{ matrix.profile }}
+    - run: touch optcd-4.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_mariadb (${{ matrix.profile }})
+        path: /home/runner/inotifywait-log-build_mariadb (${{ matrix.profile }}).csv
+  build_postgresql:
+    strategy:
+      matrix:
+        profile:
+        - assembly,postgres-12
+        - assembly,postgres-16,pgoutput-decoder
+      fail-fast: false
+    name: build_postgresql (${{ matrix.profile }})
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_postgresql (${{ matrix.profile }}).csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action
+      uses: actions/checkout@v4
+    - run: touch optcd-3.txt
+    - uses: ./.github/actions/build-debezium-postgres
+      with:
+        maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
+        profile: ${{ matrix.profile }}
+    - run: touch optcd-4.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_postgresql (${{ matrix.profile }})
+        path: /home/runner/inotifywait-log-build_postgresql (${{ matrix.profile }}).csv
+  build_sqlserver:
+    name: build_sqlserver
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_sqlserver.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action
+      uses: actions/checkout@v4
+    - run: touch optcd-3.txt
+    - uses: ./.github/actions/build-debezium-sqlserver
+      with:
+        maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
+    - run: touch optcd-4.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_sqlserver
+        path: /home/runner/inotifywait-log-build_sqlserver.csv
+  build_oracle:
+    name: build_oracle
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_oracle.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action
+      uses: actions/checkout@v4
+    - run: touch optcd-3.txt
+    - uses: ./.github/actions/build-debezium-oracle
+      with:
+        maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
+    - run: touch optcd-4.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_oracle
+        path: /home/runner/inotifywait-log-build_oracle.csv
+  build_outbox:
+    name: build_outbox
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_outbox.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action
+      uses: actions/checkout@v4
+    - run: touch optcd-3.txt
+    - uses: ./.github/actions/build-debezium-outbox
+      with:
+        maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
+    - run: touch optcd-4.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_outbox
+        path: /home/runner/inotifywait-log-build_outbox.csv
+  build_rest_extension:
+    name: build_rest_extension
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_rest_extension.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action
+      uses: actions/checkout@v4
+    - run: touch optcd-3.txt
+    - uses: ./.github/actions/build-debezium-rest-extension
+      with:
+        maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
+    - run: touch optcd-4.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_rest_extension
+        path: /home/runner/inotifywait-log-build_rest_extension.csv
+  build_schema_generator:
+    name: build_schema_generator
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_schema_generator.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action
+      uses: actions/checkout@v4
+    - run: touch optcd-3.txt
+    - uses: ./.github/actions/build-debezium-schema-generator
+      with:
+        maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
+    - run: touch optcd-4.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_schema_generator
+        path: /home/runner/inotifywait-log-build_schema_generator.csv
+  build_debezium_testing:
+    name: build_debezium_testing
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_debezium_testing.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action
+      uses: actions/checkout@v4
+    - run: touch optcd-3.txt
+    - uses: ./.github/actions/build-debezium-testing
+      with:
+        maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
+    - run: touch optcd-4.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_debezium_testing
+        path: /home/runner/inotifywait-log-build_debezium_testing.csv
+  build_storage:
+    name: build_storage
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_storage.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action
+      uses: actions/checkout@v4
+    - run: touch optcd-3.txt
+    - uses: ./.github/actions/build-debezium-storage
+      with:
+        maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
+    - run: touch optcd-4.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_storage
+        path: /home/runner/inotifywait-log-build_storage.csv
+  build_cassandra:
+    name: build_cassandra
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_cassandra.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action (Debezium Core)
+      uses: actions/checkout@v4
+      with:
+        path: core
+    - run: touch optcd-3.txt
+    - name: Checkout Action (Cassandra)
+      uses: actions/checkout@v4
+      with:
+        repository: debezium/debezium-connector-cassandra
+        path: cassandra
+        ref: ${{ github.event.pull_request.base.ref }}
+    - run: touch optcd-4.txt
+    - uses: ./core/.github/actions/setup-java
+    - run: touch optcd-5.txt
+    - uses: ./core/.github/actions/maven-cache
+      with:
+        key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
+    - run: touch optcd-6.txt
+    - uses: ./core/.github/actions/build-debezium-cassandra
+      with:
+        path-core: core
+        path-cassandra: cassandra
+    - run: touch optcd-7.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_cassandra
+        path: /home/runner/inotifywait-log-build_cassandra.csv
+  build_db2:
+    name: build_db2
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_db2.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action (Debezium Core)
+      uses: actions/checkout@v4
+      with:
+        path: core
+    - run: touch optcd-3.txt
+    - name: Checkout Action (Db2)
+      uses: actions/checkout@v4
+      with:
+        repository: debezium/debezium-connector-db2
+        path: db2
+        ref: ${{ github.event.pull_request.base.ref }}
+    - run: touch optcd-4.txt
+    - uses: ./core/.github/actions/setup-java
+    - run: touch optcd-5.txt
+    - uses: ./core/.github/actions/maven-cache
+      with:
+        key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
+    - run: touch optcd-6.txt
+    - uses: ./core/.github/actions/build-debezium-db2
+      with:
+        path-core: core
+        path-db2: db2
+    - run: touch optcd-7.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_db2
+        path: /home/runner/inotifywait-log-build_db2.csv
+  build_ibmi:
+    name: build_ibmi
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_ibmi.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action (Debezium Core)
+      uses: actions/checkout@v4
+      with:
+        path: core
+    - run: touch optcd-3.txt
+    - name: Checkout Action (IBMi)
+      uses: actions/checkout@v4
+      with:
+        repository: debezium/debezium-connector-ibmi
+        path: ibmi
+        ref: ${{ github.event.pull_request.base.ref }}
+    - run: touch optcd-4.txt
+    - uses: ./core/.github/actions/setup-java
+    - run: touch optcd-5.txt
+    - uses: ./core/.github/actions/maven-cache
+      with:
+        key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
+    - run: touch optcd-6.txt
+    - uses: ./core/.github/actions/build-debezium-ibmi
+      with:
+        path-core: core
+        path-ibmi: ibmi
+    - run: touch optcd-7.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_ibmi
+        path: /home/runner/inotifywait-log-build_ibmi.csv
+  build_informix:
+    name: build_informix
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_informix.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action (Debezium Core)
+      uses: actions/checkout@v4
+      with:
+        path: core
+    - run: touch optcd-3.txt
+    - name: Checkout Action (Informix)
+      uses: actions/checkout@v4
+      with:
+        repository: debezium/debezium-connector-informix
+        path: informix
+        ref: ${{ github.event.pull_request.base.ref }}
+    - run: touch optcd-4.txt
+    - uses: ./core/.github/actions/setup-java
+    - run: touch optcd-5.txt
+    - uses: ./core/.github/actions/maven-cache
+      with:
+        key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
+    - run: touch optcd-6.txt
+    - uses: ./core/.github/actions/build-debezium-informix
+      with:
+        path-core: core
+        path-informix: informix
+    - run: touch optcd-7.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_informix
+        path: /home/runner/inotifywait-log-build_informix.csv
+  build_vitess:
+    name: build_vitess
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_vitess.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action (Debezium Core)
+      uses: actions/checkout@v4
+      with:
+        path: core
+    - run: touch optcd-3.txt
+    - name: Checkout Action (Vitess)
+      uses: actions/checkout@v4
+      with:
+        repository: debezium/debezium-connector-vitess
+        path: vitess
+        ref: ${{ github.event.pull_request.base.ref }}
+    - run: touch optcd-4.txt
+    - uses: ./core/.github/actions/setup-java
+    - run: touch optcd-5.txt
+    - uses: ./core/.github/actions/maven-cache
+      with:
+        key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
+    - run: touch optcd-6.txt
+    - uses: ./core/.github/actions/build-debezium-vitess
+      with:
+        path-core: core
+        path-vitess: vitess
+    - run: touch optcd-7.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_vitess
+        path: /home/runner/inotifywait-log-build_vitess.csv
+  build_spanner:
+    name: build_spanner
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_spanner.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action (Debezium Core)
+      uses: actions/checkout@v4
+      with:
+        path: core
+    - run: touch optcd-3.txt
+    - name: Checkout Action (Spanner)
+      uses: actions/checkout@v4
+      with:
+        repository: debezium/debezium-connector-spanner
+        path: spanner
+        ref: ${{ github.event.pull_request.base.ref }}
+    - run: touch optcd-4.txt
+    - uses: ./core/.github/actions/setup-java
+    - run: touch optcd-5.txt
+    - uses: ./core/.github/actions/maven-cache
+      with:
+        key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
+    - run: touch optcd-6.txt
+    - uses: ./core/.github/actions/build-debezium-spanner
+      with:
+        path-core: core
+        path-spanner: spanner
+    - run: touch optcd-7.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_spanner
+        path: /home/runner/inotifywait-log-build_spanner.csv
+  build_jdbc:
+    name: build_jdbc
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_jdbc.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action
+      uses: actions/checkout@v4
+    - run: touch optcd-3.txt
+    - uses: ./.github/actions/build-debezium-jdbc
+      with:
+        maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
+    - run: touch optcd-4.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_jdbc
+        path: /home/runner/inotifywait-log-build_jdbc.csv
+  build_debezium_server:
+    name: build_debezium_server
+    needs:
+    - check_style
+    - file_changes
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-build_debezium_server.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/debezium/debezium', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - name: Checkout Action (Debezium Core)
+      uses: actions/checkout@v4
+      with:
+        path: core
+    - run: touch optcd-3.txt
+    - name: Checkout Action (Debezium Server)
+      uses: actions/checkout@v4
+      with:
+        repository: debezium/debezium-server
+        path: server
+        ref: ${{ github.event.pull_request.base.ref }}
+    - run: touch optcd-4.txt
+    - uses: ./core/.github/actions/setup-java
+    - run: touch optcd-5.txt
+    - uses: ./core/.github/actions/maven-cache
+      with:
+        key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
+    - run: touch optcd-6.txt
+    - uses: ./core/.github/actions/build-debezium-server
+      with:
+        path-core: core
+        path-server: server
+    - run: touch optcd-7.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-build_debezium_server
+        path: /home/runner/inotifywait-log-build_debezium_server.csv
+'on':
+- push
+- workflow_dispatch
